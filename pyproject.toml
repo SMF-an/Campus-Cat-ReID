@@ -1,0 +1,15 @@
+[project]
+name = "cat"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "faiss-cpu>=1.14.2",
+    "fastapi>=0.136.3",
+    "numpy>=2.4.6",
+    "pillow>=12.2.0",
+    "transformers>=5.9.0",
+    "ultralytics>=8.4.54",
+    "uvicorn[standard]>=0.48.0",
+]
