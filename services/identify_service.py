@@ -14,8 +14,9 @@ from ai.feature_extractor import VisionFeatureExtractor
 
 APP_TITLE = "Cat Recognizer"
 TOP_K = 3
-CONFIRMED_THRESHOLD = 0.90
-UNCERTAIN_THRESHOLD = 0.80
+CONFIRMED_THRESHOLD = 0.66
+GAP_THRESHOLD = 0.07
+UNCERTAIN_THRESHOLD = 0.55
 
 BASE_DIR = os.path.dirname(__file__)
 INDEX_PATH = os.path.join(BASE_DIR, "..", "ai", "index_data.npz")
@@ -60,29 +61,46 @@ def initialize_services() -> tuple[VisionFeatureExtractor, FaissIndexWrapper]:
     return extractor, index
 
 
+def _build_candidates(scores: list[float], ids: list[str]) -> list[dict]:
+    """Build Top-K candidate list with cat_id and confidence."""
+    return [{"cat_id": cid, "confidence": float(score)} for cid, score in zip(ids, scores)]
+
+
 def build_result(scores: list[float], ids: list[str]) -> dict:
-    top_score = float(scores[0]) if scores else 0.0
-    if top_score > CONFIRMED_THRESHOLD:
+    candidates = _build_candidates(scores, ids)
+    if not candidates:
         return {
-            "status": "confirmed",
-            "cat_id": ids[0],
-            "confidence": top_score,
+            "status": "unknown",
+            "cat_id": None,
+            "confidence": 0.0,
             "candidates": [],
         }
 
-    if top_score > UNCERTAIN_THRESHOLD:
+    top_score = candidates[0]["confidence"]
+    top2_score = candidates[1]["confidence"] if len(candidates) > 1 else float("-inf")
+    score_gap = top_score - top2_score if len(candidates) > 1 else 1.0
+
+    if top_score >= CONFIRMED_THRESHOLD and score_gap >= GAP_THRESHOLD:
+        return {
+            "status": "confirmed",
+            "cat_id": candidates[0]["cat_id"],
+            "confidence": top_score,
+            "candidates": candidates,  # include Top3 for UI display
+        }
+
+    if top_score >= UNCERTAIN_THRESHOLD:
         return {
             "status": "uncertain",
             "cat_id": None,
             "confidence": top_score,
-            "candidates": [{"cat_id": cid, "confidence": float(score)} for cid, score in zip(ids, scores)],
+            "candidates": candidates,
         }
 
     return {
         "status": "unknown",
         "cat_id": None,
         "confidence": top_score,
-        "candidates": [],
+        "candidates": candidates,  # include Top3 even for unknown, may still be useful
     }
 
 
