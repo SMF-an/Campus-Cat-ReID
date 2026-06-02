@@ -1,6 +1,6 @@
 # Campus Cat Recognition — AI module scaffold
 
-This folder contains a scaffold for the cat recognition pipeline (detection → CLIP features → FAISS retrieval) and a minimal FastAPI identify service.
+This folder contains a scaffold for the cat recognition pipeline (detection → DINOv3 features → FAISS retrieval) and a minimal FastAPI identify service.
 
 Quick start (create virtualenv and install):
 

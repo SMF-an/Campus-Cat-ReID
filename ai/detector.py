@@ -8,7 +8,7 @@ def crop_cat_from_bytes(image_bytes: bytes) -> Image.Image:
     returns the original image as a PIL.Image."""
     try:
         img = Image.open(BytesIO(image_bytes)).convert("RGB")
-        yolo = YOLO("yolov8n.pt")
+        yolo = YOLO("yolov8m.pt")
         results = yolo(img)
         boxes = results[0].boxes
         for box in boxes:

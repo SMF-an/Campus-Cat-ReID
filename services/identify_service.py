@@ -1,16 +1,28 @@
-from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from ai.detector import crop_cat_from_bytes
-from ai.feature_extractor import CLIPFeatureExtractor
-from ai.faiss_index import FaissIndexWrapper
-import uvicorn
+import logging
 import os
+
 import torch
+import uvicorn
+from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from ai.detector import crop_cat_from_bytes
+from ai.faiss_index import FaissIndexWrapper
+from ai.feature_extractor import VisionFeatureExtractor
 
 
-app = FastAPI(title="Cat Recognizer")
+APP_TITLE = "Cat Recognizer"
+TOP_K = 3
+CONFIRMED_THRESHOLD = 0.90
+UNCERTAIN_THRESHOLD = 0.80
 
+BASE_DIR = os.path.dirname(__file__)
+INDEX_PATH = os.path.join(BASE_DIR, "..", "ai", "index_data.npz")
+DEFAULT_CKPT = os.path.join(BASE_DIR, "..", "models", "finetuned_best.pt")
+
+logger = logging.getLogger("cat-identify")
+app = FastAPI(title=APP_TITLE)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,35 +31,70 @@ app.add_middleware(
 )
 
 
-# Initialize components
-INDEX_PATH = os.path.join(os.path.dirname(__file__), '..', 'ai', 'index_data.npz')
-index = FaissIndexWrapper(dim=512, path=INDEX_PATH)
-index.load()
+def initialize_services() -> tuple[VisionFeatureExtractor, FaissIndexWrapper]:
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    extractor = VisionFeatureExtractor(device=device)
+
+    checkpoint_path = os.environ.get("MODEL_CHECKPOINT", DEFAULT_CKPT)
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        try:
+            extractor.load_checkpoint(checkpoint_path)
+            logger.info("Loaded feature extractor checkpoint: %s (dim=%s)", checkpoint_path, extractor.dim)
+        except Exception:
+            logger.exception(
+                "Failed to load checkpoint '%s'; continuing with pretrained backbone.",
+                checkpoint_path,
+            )
+    else:
+        logger.info("No checkpoint found at %s; using pretrained backbone", checkpoint_path)
+
+    index = FaissIndexWrapper(dim=extractor.dim, path=INDEX_PATH)
+    index.load()
+    if index.vectors.shape[1] != extractor.dim:
+        logger.warning(
+            "Index dimension %s does not match extractor dimension %s; index was reset and must be rebuilt.",
+            index.vectors.shape[1],
+            extractor.dim,
+        )
+
+    return extractor, index
 
 
-extractor = CLIPFeatureExtractor(device="cuda" if torch.cuda.is_available() else "cpu")
+def build_result(scores: list[float], ids: list[str]) -> dict:
+    top_score = float(scores[0]) if scores else 0.0
+    if top_score > CONFIRMED_THRESHOLD:
+        return {
+            "status": "confirmed",
+            "cat_id": ids[0],
+            "confidence": top_score,
+            "candidates": [],
+        }
+
+    if top_score > UNCERTAIN_THRESHOLD:
+        return {
+            "status": "uncertain",
+            "cat_id": None,
+            "confidence": top_score,
+            "candidates": [{"cat_id": cid, "confidence": float(score)} for cid, score in zip(ids, scores)],
+        }
+
+    return {
+        "status": "unknown",
+        "cat_id": None,
+        "confidence": top_score,
+        "candidates": [],
+    }
+
+
+extractor, index = initialize_services()
 
 
 @app.post("/identify")
 async def identify(file: UploadFile = File(...), location_name: str = Form(""), latitude: float = Form(0.0), longitude: float = Form(0.0)):
-    data = await file.read()
-    img = crop_cat_from_bytes(data)
-    feat = extractor.extract(img)
-
-    scores, ids = index.search(feat.reshape(1, -1), top_k=3)
-    top_score = scores[0] if scores else 0.0
-    if top_score > 0.90:
-        status = "confirmed"
-        result = {"status": status, "cat_id": ids[0], "confidence": float(top_score), "candidates": []}
-    elif top_score > 0.80:
-        status = "uncertain"
-        candidates = [{"cat_id": cid, "confidence": float(s)} for cid, s in zip(ids, scores)]
-        result = {"status": status, "cat_id": None, "confidence": float(top_score), "candidates": candidates}
-    else:
-        status = "unknown"
-        result = {"status": status, "cat_id": None, "confidence": float(top_score), "candidates": []}
-
-    return JSONResponse(result)
+    image = crop_cat_from_bytes(await file.read())
+    feature = extractor.extract(image)
+    scores, ids = index.search(feature.reshape(1, -1), top_k=TOP_K)
+    return JSONResponse(build_result(scores, ids))
 
 
 if __name__ == "__main__":

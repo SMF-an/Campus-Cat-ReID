@@ -19,7 +19,7 @@
 
 ### 技术亮点
 
-- YOLO + CLIP + FAISS 多模态识别Pipeline
+- YOLO + DINOv3 + FAISS 多模态识别Pipeline
 - 置信度分级的优雅降级设计
 - LLM自动生成猫猫性格故事
 - 云端+本地混合架构（可选，拿附加分）
@@ -36,7 +36,7 @@
 输入层     照片上传 + 文字记录     偶遇照片上传
               ↓                    ↓
 AI层              猫猫身份识别
-              YOLO裁图 → CLIP特征 → FAISS检索
+              YOLO裁图 → DINOv3特征 → FAISS检索
               ↓
 处理层     特征入库 / 位置记录 / 文字标签提取
               ↓
@@ -67,7 +67,7 @@ CREATE TABLE cat_photos (
     id              SERIAL PRIMARY KEY,
     cat_id          VARCHAR(20) REFERENCES cats(id),
     photo_path      VARCHAR(200),
-    feature_vector  BYTEA,                    -- CLIP特征向量序列化
+    feature_vector  BYTEA,                    -- DINOv3特征向量序列化
     angle           VARCHAR(20),              -- 正面/侧面/俯视
     lighting        VARCHAR(20),              -- 白天/阴天/夜晚
     is_primary      BOOLEAN DEFAULT FALSE,
@@ -96,43 +96,48 @@ CREATE TABLE sightings (
 from ultralytics import YOLO
 yolo = YOLO('yolov8n.pt')
 
-def crop_cat(image_path):
-    results = yolo(image_path)
-    for box in results[0].boxes:
-        if box.cls == 15:  # COCO类别15=cat
-            x1, y1, x2, y2 = box.xyxy[0]
-            return image.crop((x1, y1, x2, y2))
-    return image  # 没检测到猫就用原图
+def crop_cat(image):
+  results = yolo(image)
+  for box in results[0].boxes:
+    if int(box.cls) == 15:  # COCO类别15=cat
+      x1, y1, x2, y2 = box.xyxy[0]
+      return image.crop((x1, y1, x2, y2))
+  return image
 
-# Step 2: CLIP提取特征
-from transformers import CLIPModel, CLIPProcessor
-clip = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+# Step 2: DINOv3 (timm) 提取特征
+import timm
+import torch
+import torchvision.transforms as T
+model = timm.create_model('vit_base_patch16_dinov3', pretrained=True, num_classes=0, global_pool='token')
+preprocess = T.Compose([T.Resize(224), T.CenterCrop(224), T.ToTensor(), T.Normalize((0.485,0.456,0.406),(0.229,0.224,0.225))])
 
 def extract_features(image):
-    inputs = processor(images=image, return_tensors="pt")
-    features = clip.get_image_features(**inputs)
-    features = features / features.norm(dim=-1, keepdim=True)  # L2归一化
-    return features.detach().numpy()
+  tensor = preprocess(image).unsqueeze(0)
+  with torch.no_grad():
+    feats = model.forward_features(tensor)
+    if feats.ndim == 3:
+      feats = feats[:, 0, :] if feats.shape[1] > 1 else feats.mean(dim=1)
+    feats = feats / feats.norm(dim=-1, keepdim=True)
+  return feats.detach().cpu().numpy()
 
 # Step 3: FAISS检索
 import faiss
 import numpy as np
-
-index = faiss.IndexFlatIP(512)  # 余弦相似度，512维
+# index should be constructed with the vector dimensionality
+# index = faiss.IndexFlatIP(feature_dim)
 
 def search_cat(query_features, top_k=3):
-    scores, indices = index.search(query_features, top_k)
-    return scores[0], indices[0]  # 相似度分数 + 猫猫索引
+  scores, indices = index.search(query_features, top_k)
+  return scores[0], indices[0]
 
 # Step 4: 置信度分级
 def classify_result(top_score):
-    if top_score > 0.80:
-        return "confirmed"   # 直接展示
-    elif top_score > 0.50:
-        return "uncertain"   # 展示Top3候选
-    else:
-        return "unknown"     # 新猫or识别失败
+  if top_score > 0.80:
+    return "confirmed"
+  elif top_score > 0.50:
+    return "uncertain"
+  else:
+    return "unknown"
 ```
 
 ### API接口定义
@@ -171,7 +176,7 @@ GET  /map/heatmap
 
 | 角色 | 任务 | 核心产出 |
 |------|------|---------|
-| **AI-1** | YOLO裁图 + CLIP特征提取 + FAISS检索 | 识别Pipeline跑通 |
+| **AI-1** | YOLO裁图 + DINOv3特征提取 + FAISS检索 | 识别Pipeline跑通 |
 | **AI-2** | 数据清洗入库 + 准确率调优 + 边界case | 10只猫全部入库，准确率>80% |
 | **后端** | FastAPI接口 + 数据库 + LLM故事生成 | 所有API可调用 |
 | **前端-1** | 上传页 + 识别结果页 + 猫猫档案页 | 主流程跑通 |
@@ -198,7 +203,7 @@ GET  /map/heatmap
 
 | 角色 | 任务 |
 |------|------|
-| AI-1 | 装环境：YOLO、CLIP、FAISS权重全部下载到本地 |
+| AI-1 | 装环境：YOLO、DINOv3(timm)、FAISS权重全部下载到本地 |
 | AI-2 | 整理猫协照片，建立标注表格（猫名 + 照片路径） |
 | 后端 | 搭FastAPI骨架，所有接口写mock，返回假数据跑通 |
 | 前端-1 | 搭React项目，上传页静态UI做出来 |
@@ -211,7 +216,7 @@ GET  /map/heatmap
 ### Day 2 — 各自并行开发
 
 **AI-1：跑通3只猫的识别**
-- YOLO检测 + CLIP特征提取完成
+- YOLO检测 + DINOv3特征提取完成
 - 3只猫照片入库FAISS
 - 封装`/identify`接口（哪怕只能识别3只猫）
 
@@ -399,7 +404,7 @@ def generate_cat_story(cat):
   → 今日校园猫猫分布热力图
 
 [2:30-3:30] 技术亮点
-  → CLIP多模态特征识别
+  → DINOv3多模态特征识别
   → 置信度分级的降级设计（展示uncertain和unknown状态）
   → 双层用户体系：猫协管理后台 vs 同学偶遇社区
 
@@ -466,7 +471,7 @@ def generate_cat_story(cat):
 | 模块 | 技术选型 |
 |------|---------|
 | 猫猫检测 | YOLOv8（ultralytics） |
-| 特征提取 | CLIP（openai/clip-vit-base-patch32） |
+| 特征提取 | DINOv3（timm: vit_base_patch16_dinov3 等） |
 | 向量检索 | FAISS（faiss-cpu） |
 | 后端框架 | FastAPI + SQLite（或PostgreSQL） |
 | 图片存储 | 本地文件系统（OSS可选） |
@@ -481,12 +486,12 @@ def generate_cat_story(cat):
 
 如果有余力，可在Day 5-6实现：
 
-将CLIP识别模型部署到**本地端**（英特尔酷睿Ultra），构建混合架构：
+将DINOv3识别模型部署到**本地端**（英特尔酷睿Ultra），构建混合架构：
 
 ```
 用户上传照片
       ↓
-本地端：YOLO裁图 + CLIP特征提取（隐私保护，速度快）
+本地端：YOLO裁图 + DINOv3特征提取（隐私保护，速度快）
       ↓
 云端：FAISS检索 + 档案查询 + LLM故事生成
       ↓

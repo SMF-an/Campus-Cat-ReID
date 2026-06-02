@@ -54,6 +54,14 @@ class FaissIndexWrapper:
         data = np.load(self.path, allow_pickle=True)
         self.ids = data["ids"].tolist()
         self.vectors = data["vectors"]
+        if self.vectors.ndim == 2 and self.vectors.shape[1] != self.dim:
+            # Dimension mismatch usually means the index was built with a different backbone.
+            # Keep the wrapper usable but start from an empty index.
+            self.ids = []
+            self.vectors = np.zeros((0, self.dim), dtype=np.float32)
+            self.meta = {}
+            self.build_index()
+            return
         try:
             self.meta = data["meta"].tolist()[0]
         except Exception:
