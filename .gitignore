@@ -14,5 +14,6 @@ data_crops/
 outputs/
 models/
 logs/
+meowzart_scraper/
 
 *.pt

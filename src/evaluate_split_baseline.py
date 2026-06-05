@@ -30,6 +30,7 @@ from PIL import Image
 
 from ai.faiss_index import FaissIndexWrapper
 from ai.feature_extractor import VisionFeatureExtractor
+from src.data_loader import stratified_split_indices
 
 logging.basicConfig(
     level=logging.INFO,
@@ -129,42 +130,26 @@ def load_manifest(manifest_path: Path) -> list[dict]:
 
 def stratified_split(
     rows: list[dict],
-    gallery_ratio: float,
+    val_ratio: float,
     seed: int,
 ) -> tuple[list[dict], list[dict], list[str]]:
-    """Split rows into gallery / test by cat_id.
+    """Split rows into gallery / test using the same logic as training.
+
+    Delegates to stratified_split_indices (src/data_loader.py) so the split
+    is bit-identical to what train.py produced for the same seed and val_ratio.
 
     Returns (gallery_rows, test_rows, skipped_test_cats).
     """
-    rng = np.random.RandomState(seed)
+    labels = [r["cat_id"] for r in rows]
+    train_indices, val_indices = stratified_split_indices(labels, val_ratio=val_ratio, seed=seed)
 
-    by_cat: dict[str, list[dict]] = defaultdict(list)
-    for r in rows:
-        by_cat[r["cat_id"]].append(r)
+    gallery = [rows[i] for i in train_indices]
+    test = [rows[i] for i in val_indices]
 
-    gallery: list[dict] = []
-    test: list[dict] = []
-    skipped: list[str] = []
-
-    for cat_id in sorted(by_cat):
-        items = by_cat[cat_id]
-        n = len(items)
-
-        if n < 2:
-            # Not enough images to split — all go to gallery
-            gallery.extend(items)
-            skipped.append(cat_id)
-            continue
-
-        # Shuffle within this cat
-        indices = rng.permutation(n).tolist()
-        n_gallery = max(1, round(n * gallery_ratio))
-        n_gallery = min(n_gallery, n - 1)  # ensure at least 1 test
-
-        for i in indices[:n_gallery]:
-            gallery.append(items[i])
-        for i in indices[n_gallery:]:
-            test.append(items[i])
+    # Cats that ended up with zero test images
+    test_cats = {r["cat_id"] for r in test}
+    all_cats = {r["cat_id"] for r in rows}
+    skipped = sorted(all_cats - test_cats)
 
     return gallery, test, skipped
 
@@ -235,11 +220,18 @@ def process_image(
 
 def main():
     parser = argparse.ArgumentParser(description="Split baseline evaluation")
-    parser.add_argument("--data-dir", default="data/cats", type=str,
-                        help="Directory with per-cat subfolders (default: data/cats)")
+    parser.add_argument("--data-dir", default="data_crops", type=str,
+                        help="Directory with per-cat subfolders (default: data_crops)")
     parser.add_argument("--manifest", default=None, type=str,
                         help="Use manifest.csv instead of --data-dir")
-    parser.add_argument("--gallery-ratio", default=0.8, type=float)
+    parser.add_argument("--checkpoint", default="models/finetuned_best.pt", type=str,
+                        help="Path to fine-tuned model checkpoint (e.g. models/finetuned_best.pt)")
+    parser.add_argument("--gallery-ratio", default=None, type=float,
+                        help="Deprecated; use --val-ratio instead (gallery_ratio = 1 - val_ratio)")
+    parser.add_argument("--val-ratio", default=0.2, type=float,
+                        help="Validation ratio for gallery/test split — must match training (default: 0.2)")
+    parser.add_argument("--min-samples", default=2, type=int,
+                        help="Drop cats with fewer than this many images — must match training --min-samples")
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--top-k", default=3, type=int)
     parser.add_argument("--out-dir", default="outputs/split_baseline", type=str)
@@ -248,13 +240,19 @@ def main():
                         help="Skip YOLO crop, use original images")
     args = parser.parse_args()
 
+    # Backward compatibility: --gallery-ratio falls back to --val-ratio
+    val_ratio = args.val_ratio
+    if args.gallery_ratio is not None:
+        val_ratio = 1.0 - args.gallery_ratio
+        logger.warning("--gallery-ratio is deprecated; using val_ratio=%.2f (1 - %.2f)", val_ratio, args.gallery_ratio)
+
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("=== Split Baseline Evaluation ===")
-    logger.info("gallery_ratio=%.2f  seed=%d  top_k=%d  device=%s  no_detect=%s",
-                args.gallery_ratio, args.seed, args.top_k, device, args.no_detect)
+    logger.info("val_ratio=%.2f  seed=%d  top_k=%d  device=%s  no_detect=%s  min_samples=%d",
+                val_ratio, args.seed, args.top_k, device, args.no_detect, args.min_samples)
 
     # ------------------------------------------------------------------
     # Step 1: Load & Split
@@ -270,8 +268,18 @@ def main():
     logger.info("Loaded %d images across %d cats",
                 len(rows), len(set(r["cat_id"] for r in rows)))
 
+    # Apply min_samples filter to match training
+    if args.min_samples > 1:
+        cat_counts = Counter(r["cat_id"] for r in rows)
+        keep_cats = {c for c, n in cat_counts.items() if n >= args.min_samples}
+        n_before = len(rows)
+        n_cats_before = len(cat_counts)
+        rows = [r for r in rows if r["cat_id"] in keep_cats]
+        logger.info("Filtered (min_samples=%d): %d → %d images, %d → %d cats",
+                    args.min_samples, n_before, len(rows), n_cats_before, len(keep_cats))
+
     gallery_rows, test_rows, skipped_cats = stratified_split(
-        rows, args.gallery_ratio, args.seed,
+        rows, val_ratio, args.seed,
     )
     logger.info("Split: gallery=%d  test=%d  skipped_test_cats=%d",
                 len(gallery_rows), len(test_rows), len(skipped_cats))
@@ -281,7 +289,7 @@ def main():
     by_cat_test = Counter(r["cat_id"] for r in test_rows)
     all_cats = sorted(set(by_cat_gallery) | set(by_cat_test))
     split_summary = {
-        "gallery_ratio": args.gallery_ratio,
+        "val_ratio": val_ratio,
         "seed": args.seed,
         "total_rows": len(rows),
         "gallery_count": len(gallery_rows),
@@ -303,8 +311,9 @@ def main():
     # Step 2: Build Gallery Index
     # ------------------------------------------------------------------
     crop_fn = make_crop_fn(args.no_detect)
-    extractor = VisionFeatureExtractor(device=device)
-    logger.info("Feature extractor ready (dim=%d)", extractor.dim)
+    extractor = VisionFeatureExtractor(device=device, checkpoint=args.checkpoint)
+    logger.info("Feature extractor ready (dim=%d)%s", extractor.dim,
+                f" (checkpoint={args.checkpoint})" if args.checkpoint else "")
 
     index = FaissIndexWrapper(dim=extractor.dim, path=str(out_dir / "index_data.npz"))
 

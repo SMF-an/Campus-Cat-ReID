@@ -23,7 +23,8 @@ class CatDataset(Dataset):
     A CSV manifest is still supported with columns: path,cat_id.
     """
 
-    def __init__(self, root: str, manifest: Optional[str] = None, transform=None):
+    def __init__(self, root: str, manifest: Optional[str] = None, transform=None,
+                 min_samples_per_class: int = 1):
         self.root = Path(root)
         self.transform = transform
         self.samples: List[Tuple[Path, str]] = []
@@ -42,6 +43,21 @@ class CatDataset(Dataset):
                 if p.is_file() and p.suffix.lower() in self._image_extensions:
                     cat_id = self._infer_cat_id(p)
                     self.samples.append((p, cat_id))
+
+        # Filter out cats with too few samples
+        if min_samples_per_class > 1:
+            cat_counts: dict[str, int] = {}
+            for _, cat in self.samples:
+                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            keep_cats = {c for c, n in cat_counts.items() if n >= min_samples_per_class}
+            n_before = len(self.samples)
+            self.samples = [(p, c) for p, c in self.samples if c in keep_cats]
+            n_dropped = n_before - len(self.samples)
+            if n_dropped > 0:
+                import logging
+                _log = logging.getLogger("cat-train")
+                _log.info("Filtered out %d samples from %d cats (min_samples_per_class=%d); %d samples remain",
+                          n_dropped, len(cat_counts) - len(keep_cats), min_samples_per_class, len(self.samples))
 
         # build mapping to numeric labels
         cats = sorted({cat for (_, cat) in self.samples})

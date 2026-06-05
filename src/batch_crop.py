@@ -144,7 +144,7 @@ def process_image(src_path: Path, dst_dir: Path, yolo, args, rel_cat: str, manif
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--src", default="data")
+    parser.add_argument("--src", default="meowzart_scraper/output/cats")
     parser.add_argument("--dst", default="data_crops")
     parser.add_argument("--model", default="yolov8m.pt", help="Path to yolov8 weights (optional)")
     parser.add_argument("--padding", type=float, default=0.10)

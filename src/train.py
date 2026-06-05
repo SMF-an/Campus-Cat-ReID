@@ -39,14 +39,17 @@ def setup_logger(log_file: str):
 
 
 def make_loaders(root: str, manifest: str, batch_size: int, val_ratio: float, seed: int,
-                 train_transform=None, val_transform=None, pk: tuple = None):
+                 train_transform=None, val_transform=None, pk: tuple = None,
+                 min_samples_per_class: int = 1):
     # Build a dataset to enumerate labels, then create per-split datasets with transforms
-    dataset_all = CatDataset(root, manifest=manifest)
+    dataset_all = CatDataset(root, manifest=manifest, min_samples_per_class=min_samples_per_class)
     labels = [dataset_all.cat2idx[cat] for _, cat in dataset_all.samples]
     train_indices, val_indices = stratified_split_indices(labels, val_ratio=val_ratio, seed=seed)
 
-    train_ds = CatDataset(root, manifest=manifest, transform=train_transform)
-    val_ds = CatDataset(root, manifest=manifest, transform=val_transform) if val_indices else None
+    train_ds = CatDataset(root, manifest=manifest, transform=train_transform,
+                          min_samples_per_class=min_samples_per_class)
+    val_ds = CatDataset(root, manifest=manifest, transform=val_transform,
+                        min_samples_per_class=min_samples_per_class) if val_indices else None
 
     train_subset = Subset(train_ds, train_indices)
     val_subset = Subset(val_ds, val_indices) if val_indices else None
@@ -128,9 +131,8 @@ def build_transforms(img_size: int = 224, use_augment: bool = True):
     train_comp = A.Compose([
         A.RandomResizedCrop(size=(img_size, img_size), scale=(0.8, 1.0)),
         A.HorizontalFlip(p=0.5),
-        # A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05, p=0.8),
+        A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05, p=0.5),
         A.Rotate(limit=10, p=0.5),
-        # A.GaussianBlur(p=0.2),
         A.CoarseDropout(max_holes=1, max_height=32, max_width=32, p=0.3),
         A.Normalize(mean=mean, std=std),
         ToTensorV2(),
@@ -259,7 +261,11 @@ def train_head(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger = setup_logger(args.log_file)
     train_t, val_t = build_transforms(img_size=getattr(args, 'img_size', 224), use_augment=getattr(args, 'augment', True))
-    train_loader, val_loader, train_size, val_size, num_classes = make_loaders(args.data_dir, args.manifest, args.batch_size, args.val_ratio, args.seed, train_transform=train_t, val_transform=val_t)
+    train_loader, val_loader, train_size, val_size, num_classes = make_loaders(
+        args.data_dir, args.manifest, args.batch_size, args.val_ratio, args.seed,
+        train_transform=train_t, val_transform=val_t,
+        min_samples_per_class=getattr(args, 'min_samples', 1),
+    )
     model = build_model(
         device,
         mode='head',
@@ -337,7 +343,11 @@ def train_triplet(args):
     pk = None
     if getattr(args, 'p', None) and getattr(args, 'k', None):
         pk = (int(args.p), int(args.k))
-    train_loader, val_loader, train_size, val_size, num_classes = make_loaders(args.data_dir, args.manifest, args.batch_size, args.val_ratio, args.seed, train_transform=train_t, val_transform=val_t, pk=pk)
+    train_loader, val_loader, train_size, val_size, num_classes = make_loaders(
+        args.data_dir, args.manifest, args.batch_size, args.val_ratio, args.seed,
+        train_transform=train_t, val_transform=val_t, pk=pk,
+        min_samples_per_class=getattr(args, 'min_samples', 2),
+    )
     model = build_model(
         device,
         mode='triplet',
@@ -474,7 +484,7 @@ def main():
     parser.add_argument('--manifest', default=None)
     parser.add_argument('--no-pretrained-backbone', action='store_true', help='Initialize the backbone without pretrained weights')
     parser.add_argument('--img-size', type=int, default=224)
-    parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--epochs', type=int, default=40)
     parser.add_argument('--batch-size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--output', default='models/finetuned.pt')
@@ -484,10 +494,11 @@ def main():
     parser.add_argument('--margin', type=float, default=0.2)
     parser.add_argument('--val-ratio', type=float, default=0.2)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--freeze-backbone-epochs', type=int, default=5, help='Freeze DINOv3 backbone for the first N triplet epochs')
+    parser.add_argument('--freeze-backbone-epochs', type=int, default=8, help='Freeze DINOv3 backbone for the first N triplet epochs')
     parser.add_argument('--backbone-lr-mult', type=float, default=0.1, help='Backbone learning-rate multiplier after unfreezing')
-    parser.add_argument('--p', type=int, default=8, help='P: identities per batch (for PK sampler)')
+    parser.add_argument('--p', type=int, default=16, help='P: identities per batch (for PK sampler)')
     parser.add_argument('--k', type=int, default=4, help='K: images per identity (for PK sampler)')
+    parser.add_argument('--min-samples', type=int, default=2, help='Drop cat classes with fewer than this many images (2+ required for triplet; 4+ recommended)')
     args = parser.parse_args()
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)

@@ -62,7 +62,7 @@ def main() -> int:
     parser.add_argument("--val-ratio", type=float, default=0.2, help="Validation ratio used for the stratified split")
     parser.add_argument("--seed", type=int, default=42, help="Random seed used for the stratified split")
     parser.add_argument("--top-k", type=int, default=3, help="Number of nearest neighbors to report")
-    parser.add_argument("--threshold", type=float, default=0.40, help="Cosine similarity threshold to accept a match")
+    parser.add_argument("--threshold", type=float, default=0.15, help="Cosine similarity threshold to accept a match")
     parser.add_argument("--checkpoint", default="models/finetuned_best.pt", help="Path to finetuned checkpoint to load for feature extraction")
     parser.add_argument("--cm-out", default="outputs/confusion_matrix.png", help="Confusion matrix image path")
     parser.add_argument("--pr-out", default="outputs/precision_recall.png", help="Precision-recall curve image path")
