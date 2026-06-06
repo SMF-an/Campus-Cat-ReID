@@ -14,9 +14,9 @@ from ai.feature_extractor import VisionFeatureExtractor
 
 APP_TITLE = "Cat Recognizer"
 TOP_K = 3
-CONFIRMED_THRESHOLD = 0.66
-GAP_THRESHOLD = 0.07
-UNCERTAIN_THRESHOLD = 0.55
+CONFIRMED_THRESHOLD = 0.57
+GAP_THRESHOLD = 0.00
+UNCERTAIN_THRESHOLD = 0.49
 
 BASE_DIR = os.path.dirname(__file__)
 INDEX_PATH = os.path.join(BASE_DIR, "..", "ai", "index_data.npz")

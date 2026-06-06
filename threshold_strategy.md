@@ -34,45 +34,47 @@ FAISS 检索 Top3 相似候选
 
 只看 `top1_score` 不够可靠。测试集中存在错误预测也有较高 score 的情况。
 
-基于 `outputs/split_baseline/predictions.csv` 的统计：
+基于本次微调模型测试结果：
 
 ```text
-测试集数量：578
-Top1 accuracy：82.35%
-Top3 accuracy：90.31%
+模型权重：models/finetuned_best.pt
+数据集：data_crops
+验证集数量：578
+Top1 accuracy：78.72%
+Top3 accuracy：88.93%
 
 Top1 正确样本：
-  平均 top1_score ≈ 0.787
-  median gap ≈ 0.126
+  median top1_score ≈ 0.649
+  median gap ≈ 0.047
 
 Top1 错误样本：
-  平均 top1_score ≈ 0.650
-  median gap ≈ 0.022
+  median top1_score ≈ 0.548
+  median gap ≈ 0.031
 ```
 
 这说明错误预测通常有一个特点：第一名和第二名分数很接近。因此 confirmed 必须同时满足：
 
 ```text
 top1_score 足够高
-gap 足够大
+当前高覆盖率方案不再强制要求 gap；如果后续误认偏多，再恢复 gap 约束
 ```
 
 ## 4. 推荐阈值
 
-当前采用平衡方案：
+当前采用偏提高自动确认覆盖率的方案：
 
 ```python
-CONFIRMED_THRESHOLD = 0.66
-GAP_THRESHOLD = 0.07
-UNCERTAIN_THRESHOLD = 0.55
+CONFIRMED_THRESHOLD = 0.57
+GAP_THRESHOLD = 0.00
+UNCERTAIN_THRESHOLD = 0.49
 ```
 
 决策规则：
 
 ```python
-if top1_score >= 0.66 and gap >= 0.07:
+if top1_score >= 0.57 and gap >= 0.00:
     status = "confirmed"
-elif top1_score >= 0.55:
+elif top1_score >= 0.49:
     status = "uncertain"
 else:
     status = "unknown"
@@ -80,25 +82,25 @@ else:
 
 ## 5. 当前测试集效果
 
-在 8:2 gallery/test split 的测试结果上，该策略表现为：
+在 `data_crops` 的 8:2 验证 split 上，该策略表现为：
 
 ```text
-confirmed 数量：328 / 578
-confirmed 覆盖率：56.75%
-confirmed 正确数：322
-confirmed precision：98.17%
+confirmed 数量：423 / 578
+confirmed 覆盖率：73.18%
+confirmed precision：88.42%
 
-uncertain 数量：223
-uncertain Top3 命中率：81.61%
+uncertain 数量：110
+uncertain Top1 命中率：60.00%
+uncertain Top3 命中率：80.91%
 
-unknown 数量：27
-unknown 比例：4.67%
+unknown 数量：45
+unknown 比例：7.79%
 ```
 
 解释：
 
-- 超过一半的测试图片可以自动展示猫档案。
-- 自动 confirmed 的误认率约为 `6 / 328 = 1.83%`。
+- 超过七成测试图片可以自动展示猫档案。
+- 自动 confirmed 的误认率约为 `49 / 423 = 11.58%`。
 - uncertain 结果适合展示候选档案，并进入后台审核。
 
 ## 6. 产品展示建议
@@ -138,18 +140,16 @@ unknown 比例：4.67%
 如果演示或上线阶段更怕误认，可以切换为保守方案：
 
 ```python
-CONFIRMED_THRESHOLD = 0.80
-GAP_THRESHOLD = 0.12
-UNCERTAIN_THRESHOLD = 0.55
+CONFIRMED_THRESHOLD = 0.60
+GAP_THRESHOLD = 0.03
+UNCERTAIN_THRESHOLD = 0.50
 ```
 
 该方案在当前测试集上的表现：
 
 ```text
-confirmed precision：98.43%
-confirmed 覆盖率：33.04%
-wrong confirmed：3
-uncertain Top3 命中率：87.78%
+confirmed precision：90.50%
+confirmed 覆盖率：41.87%
 ```
 
 代价是更多结果会进入 uncertain。
@@ -178,7 +178,7 @@ services/identify_service.py
 当前线上判定逻辑已经使用：
 
 ```text
-confirmed_threshold = 0.66
-gap_threshold = 0.07
-uncertain_threshold = 0.55
+confirmed_threshold = 0.57
+gap_threshold = 0.00
+uncertain_threshold = 0.49
 ```
